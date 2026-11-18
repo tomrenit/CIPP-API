@@ -28,6 +28,12 @@ function Get-ClassicAPIToken($tenantID, $Resource) {
         }
         try {
             if (!$script:classictoken) { $script:classictoken = [HashTable]::Synchronized(@{}) }
+            # Shared by every worker for the life of the process, so expired tokens are removed here.
+            $Now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            $Expired = foreach ($Entry in $script:classictoken.Clone().GetEnumerator()) {
+                if (($Entry.Value.expires_on -as [int64]) -le $Now) { $Entry.Key }
+            }
+            foreach ($Key in $Expired) { $script:classictoken.Remove($Key) }
             $script:classictoken.$TokenKey = Invoke-CIPPRestMethod -Uri $uri -Body $body -ContentType 'application/x-www-form-urlencoded' -ErrorAction SilentlyContinue -Method post
             return $script:classictoken.$TokenKey
         } catch {
@@ -37,7 +43,6 @@ function Get-ClassicAPIToken($tenantID, $Resource) {
             $Tenant = Get-CIPPAzDataTableEntity @TenantsTable -Filter $Filter
             if (!$Tenant) {
                 $Tenant = @{
-                    GraphErrorCount     = $null
                     LastGraphTokenError = $null
                     LastGraphError      = $null
                     PartitionKey        = 'TenantFailed'
@@ -45,7 +50,6 @@ function Get-ClassicAPIToken($tenantID, $Resource) {
                 }
             }
             $Tenant.LastGraphError = $_.Exception.Message
-            $Tenant.GraphErrorCount++
 
             Update-AzDataTableEntity -Force @TenantsTable -Entity $Tenant
             Throw "Failed to obtain Classic API Token for $TenantID - $_"

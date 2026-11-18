@@ -10,6 +10,13 @@ function Get-CIPPAlertDeviceComplianceGracePeriod {
         $InputValue,
         $TenantFilter
     )
+
+    $HasLicense = Test-CIPPStandardLicense -StandardName 'DeviceComplianceGracePeriod' -TenantFilter $TenantFilter -Preset Intune -SkipLog
+
+    if (-not $HasLicense) {
+        return
+    }
+
     try {
         $ExpiresWithinDays = 0
         if ($null -ne $InputValue.ExpiresWithinDays -and $InputValue.ExpiresWithinDays -ne '') {
@@ -45,9 +52,7 @@ function Get-CIPPAlertDeviceComplianceGracePeriod {
             }
         }
 
-        if ($AlertData) {
-            Write-AlertTrace -cmdletName $MyInvocation.MyCommand -tenantFilter $TenantFilter -data $AlertData
-        }
+        Write-AlertTrace -cmdletName $MyInvocation.MyCommand -tenantFilter $TenantFilter -data $AlertData
     } catch {
         $ErrorMessage = Get-CippException -Exception $_
         Write-LogMessage -API 'Alerts' -tenant $TenantFilter -message "Could not get compliance grace period state for $($TenantFilter): $($ErrorMessage.NormalizedError)" -sev Error -LogData $ErrorMessage

@@ -29,8 +29,11 @@ BeforeAll {
     function Get-Tenants { param($TenantFilter, [switch]$TriggerRefresh) }
     function Get-TenantGroups { param([switch]$SkipCache) }
     function Write-LogMessage { param($headers, $API, $tenant, $TenantId, $message, $Sev) }
+    function Assert-CippTenantAccess { param($Request, $TenantFilter) }
+    . (Join-Path $RepoRoot 'Modules/CIPPCore/Public/ConvertTo-CIPPODataFilterValue.ps1')
 
     . $FunctionPath
+    . (Join-Path $RepoRoot 'Modules/CIPPCore/Public/ConvertTo-CIPPODataFilterValue.ps1')
 
     $script:CustomerId = 'f0e1d2c3-0000-0000-0000-000000000001'
     $script:StaticGroupId = '11111111-1111-1111-1111-111111111111'
@@ -67,6 +70,7 @@ Describe 'Invoke-EditTenant tenant groups' {
         Mock -CommandName Add-CIPPAzDataTableEntity -MockWith { }
         Mock -CommandName Remove-CIPPAzDataTableEntity -MockWith { }
         Mock -CommandName Get-TenantGroups -MockWith { }
+        Mock -CommandName Assert-CippTenantAccess -MockWith { }
         Mock -CommandName Get-Tenants -MockWith {
             [pscustomobject]@{ customerId = $script:CustomerId; defaultDomainName = 'contoso.onmicrosoft.com'; displayName = 'Contoso' }
         }
@@ -87,6 +91,58 @@ Describe 'Invoke-EditTenant tenant groups' {
                 default { @() }
             }
         }
+    }
+
+    It 'clears static memberships for an empty selection while preserving dynamic memberships' {
+        $script:MemberEntities = @(
+            foreach ($GroupId in @($script:StaticGroupId, $script:LegacyGroupId, $script:DynamicGroupId)) {
+                [pscustomobject]@{
+                    PartitionKey = 'Member'
+                    RowKey       = '{0}-{1}' -f $GroupId, $script:CustomerId
+                    GroupId      = $GroupId
+                    customerId   = $script:CustomerId
+                }
+            }
+        )
+        $Request = New-EditRequest -TenantGroups @()
+
+        $Response = Invoke-EditTenant -Request $Request -TriggerMetadata $null
+
+        $Response.StatusCode | Should -Be ([System.Net.HttpStatusCode]::OK)
+        Should -Invoke Remove-CIPPAzDataTableEntity -Times 2 -Exactly
+        foreach ($ExpectedGroupId in @($script:StaticGroupId, $script:LegacyGroupId)) {
+            Should -Invoke Remove-CIPPAzDataTableEntity -Times 1 -Exactly -ParameterFilter {
+                $Entity.GroupId -eq $ExpectedGroupId
+            }
+        }
+        Should -Invoke Remove-CIPPAzDataTableEntity -Times 0 -Exactly -ParameterFilter {
+            $Entity.GroupId -eq $script:DynamicGroupId
+        }
+        Should -Invoke Get-TenantGroups -Times 1 -Exactly -ParameterFilter { $SkipCache }
+    }
+
+    It 'preserves memberships when tenantGroups is <Selection>' -ForEach @(
+        @{ Selection = 'omitted' }
+        @{ Selection = 'null' }
+    ) {
+        $script:MemberEntities = @(
+            [pscustomobject]@{
+                PartitionKey = 'Member'
+                RowKey       = '{0}-{1}' -f $script:StaticGroupId, $script:CustomerId
+                GroupId      = $script:StaticGroupId
+                customerId   = $script:CustomerId
+            }
+        )
+        $Request = New-EditRequest -TenantGroups $null
+        if ($Selection -eq 'omitted') {
+            $Request.Body.PSObject.Properties.Remove('tenantGroups')
+        }
+
+        $Response = Invoke-EditTenant -Request $Request -TriggerMetadata $null
+
+        $Response.StatusCode | Should -Be ([System.Net.HttpStatusCode]::OK)
+        Should -Invoke Remove-CIPPAzDataTableEntity -Times 0 -Exactly
+        Should -Invoke Add-CIPPAzDataTableEntity -Times 0 -Exactly
     }
 
     It 'adds membership for a legacy group that has no GroupType property' {
@@ -136,5 +192,48 @@ Describe 'Invoke-EditTenant tenant groups' {
         Should -Invoke Remove-CIPPAzDataTableEntity -Times 1 -Exactly -ParameterFilter {
             $Entity.GroupId -eq $script:LegacyGroupId
         }
+    }
+
+    It 'checks the tenant and each group whose membership changes, and only those' {
+        $script:MemberEntities = @(
+            [pscustomobject]@{ PartitionKey = 'Member'; RowKey = '{0}-{1}' -f $script:LegacyGroupId, $script:CustomerId; GroupId = $script:LegacyGroupId; customerId = $script:CustomerId }
+        )
+        $Request = New-EditRequest -TenantGroups @(
+            [pscustomobject]@{ groupId = $script:StaticGroupId; groupName = 'Whatever - Do this' }
+            [pscustomobject]@{ groupId = $script:LegacyGroupId; groupName = 'Whatever - Exclude that' }
+        )
+
+        $null = Invoke-EditTenant -Request $Request -TriggerMetadata $null
+
+        Should -Invoke Assert-CippTenantAccess -Times 1 -Exactly -ParameterFilter {
+            @($TenantFilter).Count -eq 2 -and $TenantFilter[0] -eq 'contoso.onmicrosoft.com' -and
+            $TenantFilter[1].type -eq 'Group' -and $TenantFilter[1].value -eq $script:StaticGroupId
+        }
+    }
+
+    It 'does not check groups when membership is unchanged' {
+        $script:MemberEntities = @(
+            [pscustomobject]@{ PartitionKey = 'Member'; RowKey = '{0}-{1}' -f $script:LegacyGroupId, $script:CustomerId; GroupId = $script:LegacyGroupId; customerId = $script:CustomerId }
+        )
+        $Request = New-EditRequest -TenantGroups @([pscustomobject]@{ groupId = $script:LegacyGroupId; groupName = 'Whatever - Exclude that' })
+
+        $Response = Invoke-EditTenant -Request $Request -TriggerMetadata $null
+
+        $Response.StatusCode | Should -Be ([System.Net.HttpStatusCode]::OK)
+        Should -Invoke Assert-CippTenantAccess -Times 0 -Exactly
+    }
+
+    It 'refuses with 403 and changes nothing when the caller cannot access a changed group' {
+        Mock -CommandName Assert-CippTenantAccess -MockWith { throw [System.UnauthorizedAccessException]::new("Your roles don't include the tenant group 'Whatever - Do this'.") }
+        $Request = New-EditRequest -TenantGroups @(
+            [pscustomobject]@{ groupId = $script:StaticGroupId; groupName = 'Whatever - Do this' }
+        )
+
+        $Response = Invoke-EditTenant -Request $Request -TriggerMetadata $null
+
+        $Response.StatusCode | Should -Be ([System.Net.HttpStatusCode]::Forbidden)
+        $Response.Body.Results | Should -BeLike "*tenant group 'Whatever - Do this'*"
+        Should -Invoke Add-CIPPAzDataTableEntity -Times 0 -Exactly
+        Should -Invoke Remove-CIPPAzDataTableEntity -Times 0 -Exactly
     }
 }

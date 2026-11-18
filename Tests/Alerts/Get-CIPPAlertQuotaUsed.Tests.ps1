@@ -2,7 +2,8 @@
 # The mailbox usage report's storageUsedInBytes already equals the live Get-MailboxStatistics
 # TotalItemSize (it excludes the Recoverable Items dumpster and the archive), so the alert trusts the
 # report figure directly. It must still skip rows the report has flagged deleted, and honour the
-# threshold, exclusion and mailbox-type filters.
+# threshold, exclusion and mailbox-type filters. When nothing qualifies it still calls Write-AlertTrace
+# exactly once with empty data, which is what resolves previously open items.
 
 BeforeAll {
     $RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
@@ -15,6 +16,7 @@ BeforeAll {
     function Write-LogMessage { param($message, $API, $tenant, $sev, $LogData) }
 
     . $AlertPath
+    . (Join-Path $RepoRoot 'Modules/CIPPCore/Public/Test-CippTransientError.ps1')
 }
 
 Describe 'Get-CIPPAlertQuotaUsed' {
@@ -36,7 +38,7 @@ Describe 'Get-CIPPAlertQuotaUsed' {
         Mock Write-LogMessage {}
         Mock Write-AlertTrace {
             param($cmdletName, $tenantFilter, $data)
-            $script:CapturedAlertData = @($data)
+            $script:CapturedAlertData = @($data | Where-Object { $null -ne $_ })
         }
     }
 
@@ -53,12 +55,13 @@ Describe 'Get-CIPPAlertQuotaUsed' {
         $Row.ProhibitSendReceiveQuotaInBytes | Should -Be 107374182400
     }
 
-    It 'does not alert when the mailbox is under the threshold' {
+    It 'reports an empty run when the mailbox is under the threshold' {
         $script:ReportRows[0].storageUsedInBytes = 53687091200 # 50%
 
         Get-CIPPAlertQuotaUsed -InputValue @{ QuotaUsedQuota = 90 } -TenantFilter 'contoso.onmicrosoft.com'
 
-        Should -Invoke Write-AlertTrace -Times 0 -Exactly
+        Should -Invoke Write-AlertTrace -Times 1 -Exactly
+        $script:CapturedAlertData.Count | Should -Be 0
     }
 
     It 'skips mailboxes the report has marked as deleted' {
@@ -66,12 +69,35 @@ Describe 'Get-CIPPAlertQuotaUsed' {
 
         Get-CIPPAlertQuotaUsed -InputValue @{ QuotaUsedQuota = 90 } -TenantFilter 'contoso.onmicrosoft.com'
 
-        Should -Invoke Write-AlertTrace -Times 0 -Exactly
+        Should -Invoke Write-AlertTrace -Times 1 -Exactly
+        $script:CapturedAlertData.Count | Should -Be 0
     }
 
     It 'only alerts on the selected mailbox types' {
         Get-CIPPAlertQuotaUsed -InputValue @{ QuotaUsedQuota = 90; QuotaUsedMailboxTypes = @{ value = @('Shared') } } -TenantFilter 'contoso.onmicrosoft.com'
 
+        Should -Invoke Write-AlertTrace -Times 1 -Exactly
+        $script:CapturedAlertData.Count | Should -Be 0
+    }
+
+    It 'does not call the reconciler when the usage report cannot be read' {
+        Mock New-GraphGetRequest { throw 'Graph unavailable' }
+
+        Get-CIPPAlertQuotaUsed -InputValue @{ QuotaUsedQuota = 90 } -TenantFilter 'contoso.onmicrosoft.com'
+
         Should -Invoke Write-AlertTrace -Times 0 -Exactly
+    }
+
+    It 'logs a <Severity> when the report read fails with <NormalizedError>' -TestCases @(
+        @{ NormalizedError = 'UnknownError'; Severity = 'Warning' }
+        @{ NormalizedError = 'Forbidden'; Severity = 'Error' }
+    ) {
+        param($NormalizedError, $Severity)
+        Mock New-GraphGetRequest { throw 'Graph failed' }
+        Mock Get-CippException { @{ NormalizedError = $NormalizedError } }
+
+        Get-CIPPAlertQuotaUsed -InputValue @{ QuotaUsedQuota = 90 } -TenantFilter 'contoso.onmicrosoft.com'
+
+        Should -Invoke Write-LogMessage -Times 1 -Exactly -ParameterFilter { $sev -eq $Severity }
     }
 }

@@ -11,7 +11,7 @@ function Get-CIPPAlertUnlicensedOneDriveData {
         $TenantFilter
     )
 
-    $HasSharePoint = Test-CIPPStandardLicense -StandardName 'UnlicensedOneDriveData' -TenantFilter $TenantFilter -Preset SharePoint
+    $HasSharePoint = Test-CIPPStandardLicense -StandardName 'UnlicensedOneDriveData' -TenantFilter $TenantFilter -Preset SharePoint -SkipLog
     if (-not $HasSharePoint) {
         return
     }
@@ -58,6 +58,8 @@ function Get-CIPPAlertUnlicensedOneDriveData {
     }
 
     if ($Billing.UnlicensedOdbSyntexBillingEnabled -eq $true) {
+        # Billing is enabled, so unlicensed OneDrive data is retained: nothing can be pending deletion.
+        Write-AlertTrace -cmdletName $MyInvocation.MyCommand -tenantFilter $TenantFilter -data $null
         return
     }
 
@@ -161,7 +163,5 @@ function Get-CIPPAlertUnlicensedOneDriveData {
         $Item
     }
 
-    if ($AlertData) {
-        Write-AlertTrace -cmdletName $MyInvocation.MyCommand -tenantFilter $TenantFilter -data $AlertData
-    }
+    Write-AlertTrace -cmdletName $MyInvocation.MyCommand -tenantFilter $TenantFilter -data $AlertData
 }

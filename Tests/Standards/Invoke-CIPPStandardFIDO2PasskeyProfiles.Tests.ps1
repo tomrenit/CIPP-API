@@ -18,7 +18,6 @@ BeforeAll {
     function Write-LogMessage { [CmdletBinding()] param($API, $tenant, $message, $sev, $LogData, $headers) $script:logs.Add(@{ Message = $message; Sev = $sev }) }
     function Write-StandardsAlert { [CmdletBinding()] param($message, $object, $tenant, $standardName, $standardId) }
     function Set-CIPPStandardsCompareField { [CmdletBinding()] param($FieldName, $CurrentValue, $ExpectedValue, $TenantFilter) }
-    function Add-CIPPBPAField { [CmdletBinding()] param($FieldName, $FieldValue, $StoreAs, $Tenant) }
     function Get-CippException { [CmdletBinding()] param($Exception) @{ NormalizedError = $Exception.Exception.Message } }
 
     . $StandardPath
@@ -142,6 +141,20 @@ Describe 'Invoke-CIPPStandardFIDO2PasskeyProfiles remediation' {
         $default = @($body.passkeyProfiles) | Where-Object { $_.id -eq 'p-default' }
         $default.keyRestrictions.isEnforced | Should -BeFalse
         @($default.keyRestrictions.aaGuids).Count | Should -Be 0
+    }
+
+    It 'ignores the dormant restriction type while restrictions are off (#1166)' {
+        $Settings = @{
+            remediate              = $true
+            PasskeyTypes           = 'deviceBound'
+            AttestationEnforcement = 'disabled'
+            EnforceKeyRestrictions = $false
+            AAGUIDs                = ''
+        }
+
+        Invoke-CIPPStandardFIDO2PasskeyProfiles -Tenant $script:Tenant -Settings $Settings
+
+        $script:lastBody | Should -BeNullOrEmpty
     }
 
     It 'refuses to enforce with no AAGUIDs and does not PATCH' {

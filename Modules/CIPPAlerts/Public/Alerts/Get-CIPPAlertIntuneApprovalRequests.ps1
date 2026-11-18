@@ -11,6 +11,12 @@ function Get-CIPPAlertIntuneApprovalRequests {
         $TenantFilter
     )
 
+    $HasLicense = Test-CIPPStandardLicense -StandardName 'IntuneApprovalRequests' -TenantFilter $TenantFilter -Preset Intune -SkipLog
+
+    if (-not $HasLicense) {
+        return
+    }
+
     try {
         # Multi-admin approval holds a change until a second admin approves it. Nothing tells the
         # requestor it is waiting, so a pending request is a change someone believes they already made.
@@ -32,9 +38,7 @@ function Get-CIPPAlertIntuneApprovalRequests {
             @{Name = 'Message'; Expression = { $Message } }
         }
 
-        if ($AlertData) {
-            Write-AlertTrace -cmdletName $MyInvocation.MyCommand -tenantFilter $TenantFilter -data $AlertData
-        }
+        Write-AlertTrace -cmdletName $MyInvocation.MyCommand -tenantFilter $TenantFilter -data $AlertData
     } catch {
         $ErrorMessage = Get-CippException -Exception $_
         Write-LogMessage -API 'Alerts' -tenant $TenantFilter -message "Failed to check Intune multi-admin approval requests for $($TenantFilter): $($ErrorMessage.NormalizedError)" -sev Error -LogData $ErrorMessage
